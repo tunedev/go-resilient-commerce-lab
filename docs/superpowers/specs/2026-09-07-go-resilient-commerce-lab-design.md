@@ -511,9 +511,12 @@ static diagrams in the README and ADRs stay inline Mermaid.
 
 ## 11. Jira structure
 
-Ten epics: A through H, plus a Docs/Site epic folded into A, plus an Icebox.
+Project: **PL — GoResilienceLearnings** on `sanusiababatunde.atlassian.net`.
 
-**All ten epics are created up front; full stories are written for Epic A only.**
+Nine epics: A through H, plus an Icebox. Docs and site work lives inside Epic A
+rather than in an epic of its own.
+
+**All nine epics are created up front; full stories are written for Epic A only.**
 Eighty stories written now would go stale before they are reached, and would
 contradict working incrementally. Each subsequent epic's stories are written at
 its kickoff, informed by what the previous epic actually taught.
@@ -524,29 +527,47 @@ build-along rather than a codebase someone intends to write about later.
 
 Labels: `go` `docker` `saga` `outbox` `otel` `chaos` `ci` `blog` `diagram`
 
+### Epics
+
+| Key | Epic |
+| --- | --- |
+| PL-7 | A — Foundation and idempotency |
+| PL-8 | B — Inventory and overselling |
+| PL-9 | C — Payment and the unknown state |
+| PL-10 | D — Saga orchestration |
+| PL-11 | E — Outbox and duplicate events |
+| PL-12 | F — Notifications and resilience patterns |
+| PL-13 | G — Observability deepening |
+| PL-14 | H — Chaos and debugging lab |
+| PL-15 | Icebox — alternatives deliberately deferred |
+
 ### Epic A stories
 
 ```
-A1  Repo scaffolding: go.mod, Makefile, .golangci.yml, .gitignore, LICENSE
-A2  internal/config   — env-based configuration
-A3  internal/logger   — slog JSON with trace-correlation handler
-A4  internal/otelx    — tracer and meter providers, OTLP exporter, clean shutdown
-A5  internal/httpx    — server, graceful shutdown, error envelope, middleware chain
-A6  internal/postgres — pgxpool, goose migrations under advisory lock, tx helper
-A7  compose: postgres, otel-collector, jaeger, prometheus, grafana
-A8  Dockerfile (multi-stage, ARG SERVICE) and order service in compose
-A9  order domain: statuses and transitions, pure and table-tested
-A10 POST /orders happy path: handler -> app -> pg repo
-A11 internal/idempotency: store, request hashing, middleware (replay / 409 / 202)
-A12 GET /orders/{id}
-A13 /healthz, /readyz, /metrics
-A14 cmd/labctl skeleton and scenario duplicate-order
-A15 GitHub Actions: lint, test, build
-A16 Hugo site, PaperMod, Pages workflow
-A17 PR template and README architecture section
-A18 Diagram: system-topology
-A19 Posts 1 and 2
+PL-16  A1   Repo scaffolding: go.mod, Makefile, .golangci.yml, .gitignore, LICENSE
+PL-17  A2   internal/config   — env-based configuration
+PL-18  A3   internal/logger   — slog JSON with trace-correlation handler
+PL-19  A4   internal/otelx    — tracer and meter providers, OTLP exporter, clean shutdown
+PL-20  A5   internal/httpx    — server, graceful shutdown, error envelope, middleware chain
+PL-21  A6   internal/postgres — pgxpool, goose migrations under advisory lock, tx helper
+PL-22  A7   compose: postgres (four databases), otel-collector, jaeger, prometheus, grafana
+PL-23  A8   Dockerfile (multi-stage, ARG SERVICE) and order service in compose
+PL-24  A9   order domain: statuses and transitions, pure and table-tested
+PL-25  A10  POST /orders happy path: handler -> app -> pg repo
+PL-26  A11  internal/idempotency: store, request hashing, middleware (replay / 409 / 202)
+PL-27  A12  GET /orders/{id}
+PL-28  A13  /healthz, /readyz, /metrics
+PL-29  A14  internal/outbox: table, WithTx write, publisher worker behind outbox.Sink
+PL-30  A15  cmd/labctl skeleton and scenario duplicate-order
+PL-31  A16  GitHub Actions: lint, test, integration, build
+PL-32  A17  Hugo site with PaperMod, Pages deploy workflow
+PL-33  A18  PR template and README architecture section
+PL-34  A19  Diagram: system-topology
+PL-35  A20  Posts 1 and 2
 ```
+
+A14 carries the outbox groundwork that §13 requires in Epic A. Twenty stories,
+not nineteen.
 
 ## 12. Delivery loop
 
@@ -608,7 +629,7 @@ called an orchestrated saga is a process manager.
 
 ## 15. Open items
 
-- Jira site and project key to be confirmed once the Atlassian MCP is
-  authenticated; epics and Epic A stories are created from this document.
+- Jira epics and Epic A stories exist in PL. Stories for epics B through H are
+  written at each epic's kickoff, not now.
 - GitHub Pages must be enabled for the repository with source set to GitHub
   Actions before the `pages` workflow can deploy.
