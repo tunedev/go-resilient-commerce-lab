@@ -1,0 +1,13 @@
+{{ $name := .Get "name" }}
+{{ $title := .Get "title" }}
+{{ if not $name }}{{ errorf "diagram shortcode called without a name in %s" .Page.File.Path }}{{ end }}
+{{ if not $title }}{{ errorf "diagram shortcode called without a title in %s" .Page.File.Path }}{{ end }}
+<figure class="diagram">
+  <iframe
+    src="{{ .Site.BaseURL }}diagrams/{{ $name }}.html"
+    title="{{ $title }}"
+    loading="lazy"
+    style="width:100%;height:{{ default "640" (.Get "height") }}px;border:0;border-radius:8px;">
+  </iframe>
+  <figcaption>{{ $title }}</figcaption>
+</figure>

@@ -1,0 +1,18 @@
+version: "2"
+
+linters:
+  enable:
+    - bodyclose
+    - errorlint
+    - revive
+    - rowserrcheck
+    - sqlclosecheck
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/tunedev/go-resilient-commerce-lab
