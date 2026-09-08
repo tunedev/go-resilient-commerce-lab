@@ -34,12 +34,13 @@ func main() {
 			fmt.Fprintf(os.Stderr, "scenario requires a name; known scenarios: %v\n", scenarioNames())
 			os.Exit(2)
 		}
-		if err := runScenario(ctx, flag.Arg(1), env); err != nil {
+		ran, err := runScenario(ctx, flag.Arg(1), env)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "FAIL: %v\n", err)
 			os.Exit(1)
 		}
 		fmt.Printf("PASS\n")
-		fmt.Printf("trace: %s/search?service=order\n", env.jaegerURL)
+		fmt.Printf("trace: %s\n", ran.traceURL(env.jaegerURL, "order"))
 	default:
 		usage()
 		os.Exit(2)

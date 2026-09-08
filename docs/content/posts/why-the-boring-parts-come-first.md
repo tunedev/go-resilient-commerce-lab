@@ -271,7 +271,7 @@ $ make scenario NAME=duplicate-order
 running scenario duplicate-order: the same Idempotency-Key twice yields one order, not two
 one order created: ord_1a0d7838-368a-4aef-b178-1e91d6415a87
 PASS
-trace: http://localhost:16686/search?service=order
+trace: http://localhost:16686/search?service=order&start=1788872659582862&end=1788872899588166&limit=20
 ```
 
 Then ask Jaeger's API what it received, rather than looking at a picture of it.
