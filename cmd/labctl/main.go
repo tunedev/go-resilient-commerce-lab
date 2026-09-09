@@ -14,6 +14,8 @@ import (
 func main() {
 	orderURL := flag.String("order-url", envOr("LABCTL_ORDER_URL", "http://localhost:8080"),
 		"base URL of the order service")
+	inventoryURL := flag.String("inventory-url", envOr("LABCTL_INVENTORY_URL", "http://localhost:8081"),
+		"base URL of the inventory service")
 	jaegerURL := flag.String("jaeger-url", envOr("LABCTL_JAEGER_URL", "http://localhost:16686"),
 		"base URL of the Jaeger UI")
 	flag.Parse()
@@ -26,7 +28,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	env := environment{orderBaseURL: *orderURL, jaegerURL: *jaegerURL}
+	env := environment{orderBaseURL: *orderURL, inventoryBaseURL: *inventoryURL, jaegerURL: *jaegerURL}
 
 	switch flag.Arg(0) {
 	case "scenario":
@@ -34,13 +36,14 @@ func main() {
 			fmt.Fprintf(os.Stderr, "scenario requires a name; known scenarios: %v\n", scenarioNames())
 			os.Exit(2)
 		}
-		ran, err := runScenario(ctx, flag.Arg(1), env)
+		name := flag.Arg(1)
+		ran, service, err := runScenario(ctx, name, env)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "FAIL: %v\n", err)
 			os.Exit(1)
 		}
 		fmt.Printf("PASS\n")
-		fmt.Printf("trace: %s\n", ran.traceURL(env.jaegerURL, "order"))
+		fmt.Printf("trace: %s\n", ran.traceURL(env.jaegerURL, service))
 	default:
 		usage()
 		os.Exit(2)

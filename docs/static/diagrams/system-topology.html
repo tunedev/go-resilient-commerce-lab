@@ -768,7 +768,7 @@
   <!-- 1. Top-of-page text. Change SYSTEM_NAME, the accented words, and the subtitle. -->
   <span class="eyebrow"><span class="dot"></span> go-resilient-commerce-lab</span>
   <h1>The order path <span class="accent">and the transaction boundary</span></h1>
-  <p class="sub">One service, four separate databases, and one transaction that carries the order row,
+  <p class="sub">Two services, four separate databases, and one transaction that carries the order row,
      its items, its outbox event and its idempotency key together.</p>
 </header>
 
@@ -869,11 +869,22 @@
         <span class="step-badge">·</span>
       </div>
 
-      <!-- The only implemented service -->
+      <!-- The service these flows walk through -->
       <div class="node" data-role="orch" data-id="order" style="left: 20%; top: 24%;">
         <div class="icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg></div>
         <div class="label">order-service</div>
         <div class="tech">Go · POST /orders<br>GET /orders/{id}<br>/healthz /readyz /metrics</div>
+        <div class="port">:8080</div>
+        <span class="step-badge">·</span>
+      </div>
+
+      <!-- A second implemented service. Its own database, own outbox
+           publisher and own expiry sweeper; the order path above never
+           calls it, so it carries no wires into these flows. -->
+      <div class="node" data-role="orch" data-id="inventory" style="left: 20%; top: 44%; width: 190px;">
+        <div class="icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg></div>
+        <div class="label">inventory-service</div>
+        <div class="tech">Go · inventory API<br>own publisher + sweeper</div>
         <div class="port">:8080</div>
         <span class="step-badge">·</span>
       </div>
@@ -900,10 +911,11 @@
         <span class="step-badge">·</span>
       </div>
 
-      <!-- The three sibling databases: present, and nothing touches them -->
-      <div class="node compact unused" data-role="vector" data-id="db_inventory" style="left: 73%; top: 10%;">
+      <!-- inventory is now read and written, by inventory-service alone;
+           payments and notifications are still untouched -->
+      <div class="node compact" data-role="vector" data-id="db_inventory" style="left: 73%; top: 10%;">
         <div class="label">inventory</div>
-        <div class="tech">database · no reader, no writer</div>
+        <div class="tech">database · read and written by inventory-service</div>
         <span class="step-badge">·</span>
       </div>
       <div class="node compact unused" data-role="vector" data-id="db_payments" style="left: 73%; top: 23%;">
@@ -958,7 +970,7 @@
       <div class="node" data-role="compute" data-id="prometheus" style="left: 76%; top: 73%;">
         <div class="icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg></div>
         <div class="label">Prometheus</div>
-        <div class="tech">scrapes order:8080/metrics</div>
+        <div class="tech">scrapes order:8080/metrics<br>and inventory:8080/metrics</div>
         <div class="port">:9090</div>
         <span class="step-badge">·</span>
       </div>
@@ -1353,9 +1365,9 @@ span:
       },
       {
         from:"prometheus", to:"order", color:"--c-compute",
-        title:"Scrape /metrics from the service",
+        title:"Scrape /metrics from each service",
         route:"GET /metrics",
-        desc:"Prometheus pulls directly from the service. The endpoint is served from the registry the OpenTelemetry Prometheus exporter writes into, so the metric path never touches the collector.",
+        desc:"Prometheus pulls directly from order-service and, on the same job list, from inventory-service. Each endpoint is served from the registry its own OpenTelemetry Prometheus exporter writes into, so the metric path never touches the collector.",
         payload:
 `global:
   scrape_interval: 5s
@@ -1363,8 +1375,12 @@ span:
 scrape_configs:
   - job_name: order
     static_configs:
-      - targets: ["order:8080"]`,
-        chips:["5s interval","pull, not push"]
+      - targets: ["order:8080"]
+
+  - job_name: inventory
+    static_configs:
+      - targets: ["inventory:8080"]`,
+        chips:["5s interval","pull, not push","2 targets"]
       },
       {
         from:"grafana", to:"prometheus", color:"--c-compute",

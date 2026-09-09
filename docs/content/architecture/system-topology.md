@@ -3,10 +3,10 @@ title: "System topology"
 description: "The order path, the four separate databases, and the transaction boundary that holds one order together."
 ---
 
-An interactive walk through what runs today: one client, one service, four
-separate databases, a background publisher, and the telemetry stack. Pick a path
-from the tab bar and step through it; drag nodes to rearrange, and press `T` to
-switch themes.
+An interactive walk through what runs today: one client, two services, four
+separate databases (two of them written to), two background publishers, and
+the telemetry stack. Pick a path from the tab bar and step through it; drag
+nodes to rearrange, and press `T` to switch themes.
 
 {{< diagram name="system-topology" title="The order path and the transaction boundary" >}}
 
@@ -18,8 +18,10 @@ inside one transaction against one database, and the diagram draws that boundary
 as the loudest thing on the canvas. It is a boundary in both directions: nothing
 inside it can commit alone, and nothing outside it can join.
 
-The other three databases -- `inventory`, `payments`, `notifications` -- are
-created by the same Postgres container and nothing reads or writes them. They
+`inventory` is now written to, but by the inventory service's own transactions,
+never by the order-service transaction above: nothing in this diagram's order
+path reads or writes it. `payments` and `notifications` remain created by the
+same Postgres container with nothing reading or writing them at all. All three
 are drawn because their separateness is what makes the boundary meaningful: a
 transaction spanning two of them is not discouraged, it is impossible.
 
@@ -28,18 +30,21 @@ transaction spanning two of them is not discouraged, it is impossible.
 | Node | What it is |
 | --- | --- |
 | `labctl` | The Go CLI that drives the lab and asserts its own outcomes. |
-| `order-service` | The only implemented service. Serves `POST /orders`, `GET /orders/{id}`, `/healthz`, `/readyz` and `/metrics` on `:8080`. |
+| `order-service` | Serves `POST /orders`, `GET /orders/{id}`, `/healthz`, `/readyz` and `/metrics` on `:8080`. This diagram walks its write path. |
+| `inventory-service` | Serves `PUT /inventory/items/{sku}`, `POST /inventory/reservations`, the commit and release routes, `/healthz`, `/readyz` and `/metrics` on `:8080` (published on host port `8081`). The order service never calls it; nothing in this diagram's paths does either. |
 | `orders` database | Holds `orders`, `order_items`, `outbox_events` and `idempotency_keys`. |
-| `inventory`, `payments`, `notifications` | Separate databases in the same Postgres container. No reader, no writer. |
-| outbox publisher | A goroutine in the order-service process. Claims due outbox rows with `FOR UPDATE SKIP LOCKED` and hands them to a sink. |
-| log sink | The only `Sink` implementation. Writes a structured log line and reports success. |
+| `inventory` database | Holds `inventory_items`, `inventory_reservations` and its own `outbox_events`. Read and written only by inventory-service. |
+| `payments`, `notifications` | Separate databases in the same Postgres container. No reader, no writer. |
+| outbox publishers | One goroutine per service, each in its own process, each claiming its own database's due outbox rows with `FOR UPDATE SKIP LOCKED` and handing them to a sink. |
+| expiry sweeper | A goroutine in the inventory-service process. Claims reservations past `expires_at` with `FOR UPDATE SKIP LOCKED`, expires them and returns their quantity to available stock. Has no order-service counterpart. |
+| log sink | The only `Sink` implementation. Writes a structured log line and reports success. Used by both publishers. |
 | `otel-collector` | Receives OTLP over gRPC on `:4317`, batches, and exports to Jaeger. A traces pipeline only. |
 | Jaeger | Trace storage and UI on `:16686`. |
-| Prometheus | Scrapes `order:8080/metrics` directly on a five second interval. |
+| Prometheus | Scrapes `order:8080/metrics` and `inventory:8080/metrics` directly on a five second interval. |
 | Grafana | Published on host port `3300`. Provisioned with Prometheus and Jaeger as datasources. |
 
-There is no message broker in this system, and no inventory, payment or
-notification service. The event path ends at the log sink.
+There is no message broker in this system, and no payment or notification
+service. The event path ends at the log sink.
 
 ## The paths
 
@@ -80,7 +85,7 @@ retry limit the row is marked `dead_lettered` and logged.
 Spans are batched and exported over OTLP to the collector, which forwards them
 to Jaeger. Each request produces one server span named after its route pattern;
 there are no per-query database spans. Metrics take a different path entirely:
-Prometheus pulls `/metrics` from the service, so the metric path never touches
+Prometheus pulls `/metrics` from each service, so the metric path never touches
 the collector. Grafana reads both.
 
 ## The mode toggle

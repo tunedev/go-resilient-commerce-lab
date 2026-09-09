@@ -11,13 +11,15 @@ import (
 
 // Config is the configuration shared by every service binary.
 type Config struct {
-	ServiceName        string
-	HTTPAddr           string
-	DatabaseDSN        string
-	OTLPEndpoint       string
-	LogLevel           slog.Level
-	OutboxPollInterval time.Duration
-	ShutdownTimeout    time.Duration
+	ServiceName              string
+	HTTPAddr                 string
+	DatabaseDSN              string
+	OTLPEndpoint             string
+	LogLevel                 slog.Level
+	OutboxPollInterval       time.Duration
+	ShutdownTimeout          time.Duration
+	ReservationTTL           time.Duration
+	ReservationSweepInterval time.Duration
 }
 
 // Load reads configuration for the named service. It returns an error naming
@@ -43,14 +45,26 @@ func Load(serviceName string) (Config, error) {
 		return Config{}, err
 	}
 
+	reservationTTL, err := parseDuration("RESERVATION_TTL", 15*time.Minute)
+	if err != nil {
+		return Config{}, err
+	}
+
+	reservationSweepInterval, err := parseDuration("RESERVATION_SWEEP_INTERVAL", 30*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
-		ServiceName:        serviceName,
-		HTTPAddr:           env("HTTP_ADDR", ":8080"),
-		DatabaseDSN:        dsn,
-		OTLPEndpoint:       env("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4317"),
-		LogLevel:           level,
-		OutboxPollInterval: pollInterval,
-		ShutdownTimeout:    shutdownTimeout,
+		ServiceName:              serviceName,
+		HTTPAddr:                 env("HTTP_ADDR", ":8080"),
+		DatabaseDSN:              dsn,
+		OTLPEndpoint:             env("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4317"),
+		LogLevel:                 level,
+		OutboxPollInterval:       pollInterval,
+		ShutdownTimeout:          shutdownTimeout,
+		ReservationTTL:           reservationTTL,
+		ReservationSweepInterval: reservationSweepInterval,
 	}, nil
 }
 
