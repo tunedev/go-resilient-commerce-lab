@@ -11,12 +11,14 @@ import (
 type scenario struct {
 	name        string
 	description string
+	service     string // service whose traces the run's trace URL links to
 	run         func(ctx context.Context, env environment) error
 }
 
 type environment struct {
-	orderBaseURL string
-	jaegerURL    string
+	orderBaseURL     string
+	inventoryBaseURL string
+	jaegerURL        string
 }
 
 var scenarios = map[string]scenario{}
@@ -34,18 +36,19 @@ func scenarioNames() []string {
 	return names
 }
 
-// runScenario runs the named scenario and reports the window it ran in, so the
-// caller can build a trace query bounded to exactly that window.
-func runScenario(ctx context.Context, name string, env environment) (window, error) {
+// runScenario runs the named scenario and reports the window it ran in and
+// the service its traces belong to, so the caller can build a trace query
+// bounded to exactly that window without looking the scenario up again.
+func runScenario(ctx context.Context, name string, env environment) (window, string, error) {
 	s, ok := scenarios[name]
 	if !ok {
-		return window{}, fmt.Errorf("unknown scenario %q; known scenarios: %v", name, scenarioNames())
+		return window{}, "", fmt.Errorf("unknown scenario %q; known scenarios: %v", name, scenarioNames())
 	}
 	fmt.Printf("running scenario %s: %s\n", s.name, s.description)
 
 	start := time.Now()
 	err := s.run(ctx, env)
-	return window{start: start, end: time.Now()}, err
+	return window{start: start, end: time.Now()}, s.service, err
 }
 
 // window is the wall-clock span a scenario occupied.

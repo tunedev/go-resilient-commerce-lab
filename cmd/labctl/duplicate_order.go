@@ -12,6 +12,7 @@ func init() {
 	register(scenario{
 		name:        "duplicate-order",
 		description: "the same Idempotency-Key twice yields one order, not two",
+		service:     "order",
 		run:         runDuplicateOrder,
 	})
 }

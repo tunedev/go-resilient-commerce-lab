@@ -43,7 +43,6 @@ jobs:
       - run: go test -race -tags=integration ./...
 
   scenario:
-    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -53,6 +52,7 @@ jobs:
           cache: true
       - run: docker compose -f deploy/docker-compose.yml up -d --build
       - run: go run ./cmd/labctl scenario duplicate-order
+      - run: go run ./cmd/labctl scenario last-playstation
       - if: failure()
         run: docker compose -f deploy/docker-compose.yml logs
       - if: always()

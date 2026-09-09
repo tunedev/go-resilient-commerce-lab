@@ -5,3 +5,7 @@ scrape_configs:
   - job_name: order
     static_configs:
       - targets: ["order:8080"]
+
+  - job_name: inventory
+    static_configs:
+      - targets: ["inventory:8080"]

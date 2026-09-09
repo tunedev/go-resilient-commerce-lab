@@ -258,8 +258,8 @@ cheapest way to promote it is to break the code on purpose and watch.
 Integration tests are behind a build tag and run real Postgres 18.6 in
 testcontainers, so `go test ./...` stays fast and `make integration` is the slow
 honest one. CI runs the same three checks -- `golangci-lint`, `go test -race`
-and `go test -race -tags=integration` -- as separate jobs, plus a fourth on
-`main` only that brings the compose stack up and runs the scenario against it.
+and `go test -race -tags=integration` -- as separate jobs, plus a fourth that
+brings the compose stack up and runs the scenarios against it.
 
 ## How I observed it
 

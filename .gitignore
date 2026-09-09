@@ -1,4 +1,7 @@
 /bin/
+/inventory
+/labctl
+/order
 *.test
 *.out
 .env

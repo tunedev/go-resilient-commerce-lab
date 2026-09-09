@@ -35,6 +35,12 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	if cfg.OTLPEndpoint != "localhost:4317" {
 		t.Errorf("OTLPEndpoint = %q, want %q", cfg.OTLPEndpoint, "localhost:4317")
 	}
+	if cfg.ReservationTTL != 15*time.Minute {
+		t.Errorf("ReservationTTL = %v, want %v", cfg.ReservationTTL, 15*time.Minute)
+	}
+	if cfg.ReservationSweepInterval != 30*time.Second {
+		t.Errorf("ReservationSweepInterval = %v, want %v", cfg.ReservationSweepInterval, 30*time.Second)
+	}
 }
 
 func TestLoadFailsWithoutRequiredValue(t *testing.T) {
@@ -54,6 +60,8 @@ func TestLoadReadsOverrides(t *testing.T) {
 	t.Setenv("HTTP_ADDR", ":9999")
 	t.Setenv("LOG_LEVEL", "debug")
 	t.Setenv("OUTBOX_POLL_INTERVAL", "250ms")
+	t.Setenv("RESERVATION_TTL", "5m")
+	t.Setenv("RESERVATION_SWEEP_INTERVAL", "10s")
 
 	cfg, err := config.Load("order")
 	if err != nil {
@@ -68,6 +76,12 @@ func TestLoadReadsOverrides(t *testing.T) {
 	}
 	if cfg.OutboxPollInterval != 250*time.Millisecond {
 		t.Errorf("OutboxPollInterval = %v, want %v", cfg.OutboxPollInterval, 250*time.Millisecond)
+	}
+	if cfg.ReservationTTL != 5*time.Minute {
+		t.Errorf("ReservationTTL = %v, want %v", cfg.ReservationTTL, 5*time.Minute)
+	}
+	if cfg.ReservationSweepInterval != 10*time.Second {
+		t.Errorf("ReservationSweepInterval = %v, want %v", cfg.ReservationSweepInterval, 10*time.Second)
 	}
 }
 

@@ -23,14 +23,6 @@ const (
 	StatusManualReview           Status = "manual_review"
 )
 
-// AllStatuses is the full status domain, used to build the database CHECK constraint.
-var AllStatuses = []Status{
-	StatusPending, StatusInventoryReserved, StatusPaymentPending,
-	StatusPaymentSucceeded, StatusPaymentFailed, StatusConfirmed,
-	StatusCancelled, StatusExpired, StatusAwaitingReconciliation,
-	StatusManualReview,
-}
-
 // transitions is the complete set of legal edges. A status absent as a key is
 // terminal. StatusAwaitingReconciliation deliberately has no edge to
 // StatusCancelled: an unknown payment must never trigger compensation.
