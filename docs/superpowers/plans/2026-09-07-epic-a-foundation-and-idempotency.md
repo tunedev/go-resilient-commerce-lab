@@ -27,9 +27,10 @@ Go SDK, Prometheus client, testcontainers-go, Docker Compose, Hugo.
   - `github.com/jackc/pgx/v5 v5.10.0`
   - `github.com/pressly/goose/v3 v3.28.0`
   - `go.opentelemetry.io/otel v1.46.0`
+  - `go.opentelemetry.io/otel/trace v1.46.0` (separate module from `otel`)
+  - `go.opentelemetry.io/otel/metric v1.46.0` (separate module from `otel`)
   - `go.opentelemetry.io/otel/sdk v1.46.0`
-  - `go.opentelemetry.io/otel/trace v1.46.0`
-  - `go.opentelemetry.io/otel/metric v1.46.0`
+  - `go.opentelemetry.io/otel/sdk/metric v1.46.0` (separate module from `otel/sdk`)
   - `go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.71.0`
   - `go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.46.0`
   - `go.opentelemetry.io/otel/exporters/prometheus v0.68.0`
@@ -37,7 +38,6 @@ Go SDK, Prometheus client, testcontainers-go, Docker Compose, Hugo.
   - `github.com/testcontainers/testcontainers-go v0.44.0`
   - `github.com/testcontainers/testcontainers-go/modules/postgres v0.44.0`
   - `github.com/google/uuid v1.6.0`
-  - `github.com/stretchr/testify v1.12.1`
 - Pinned container images, exact:
   - `postgres:18.6`
   - `otel/opentelemetry-collector-contrib:0.160.0`
@@ -56,8 +56,22 @@ Go SDK, Prometheus client, testcontainers-go, Docker Compose, Hugo.
 - `services/order/domain` must not import a database driver, `net/http`, or
   anything from `adapter/`.
 - Every exported function that performs I/O takes `ctx context.Context` first.
+- Tests use the standard library `testing` package only. No assertion library:
+  every assertion in this plan is a plain `if` with `t.Errorf`. `testify` may
+  appear in `go.mod` as an indirect dependency of testcontainers; it is never
+  imported by this code.
 - Errors are wrapped with `fmt.Errorf("...: %w", err)`. Never discard an error to
   satisfy the linter.
+- **Every commit must stand alone.** A task that runs `go get` stages `go.mod`
+  and `go.sum` in the same commit as the code that imports them, and runs
+  `go mod tidy` before committing so the module graph matches the imports.
+- **Verify the commit, not the working tree.** A green `go build` in a dirty
+  working tree proves nothing about what was committed. Before reporting, check
+  the commit builds in isolation:
+
+  ```bash
+  T=$(mktemp -d) && git archive HEAD | tar -x -C "$T" && (cd "$T" && go build ./... && go test ./...) ; rm -rf "$T"
+  ```
 
 ## Deviation from the spec, recorded here
 
@@ -191,11 +205,15 @@ formatters:
 
 Recipe lines must be indented with real tab characters, not spaces.
 
+There is deliberately no `migrate` target. Migrations run at service startup
+under an advisory lock (Task 7), so a separate target would either duplicate
+that or imply a mode the binary does not have.
+
 ```make
 MODULE := github.com/tunedev/go-resilient-commerce-lab
 COMPOSE := docker compose -f deploy/docker-compose.yml
 
-.PHONY: fmt lint vet test test-race integration run docker-up docker-down migrate scenario site
+.PHONY: fmt lint vet test test-race integration run docker-up docker-down scenario site
 
 fmt:
 	golangci-lint fmt ./...
@@ -224,9 +242,6 @@ docker-up:
 
 docker-down:
 	$(COMPOSE) down -v
-
-migrate:
-	$(COMPOSE) run --rm order -migrate-only
 
 scenario:
 	go run ./cmd/labctl scenario $(NAME)
@@ -388,6 +403,21 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	if cfg.ShutdownTimeout != 15*time.Second {
 		t.Errorf("ShutdownTimeout = %v, want %v", cfg.ShutdownTimeout, 15*time.Second)
 	}
+	if cfg.OutboxPollInterval != time.Second {
+		t.Errorf("OutboxPollInterval = %v, want %v", cfg.OutboxPollInterval, time.Second)
+	}
+	if cfg.OTLPEndpoint != "localhost:4317" {
+		t.Errorf("OTLPEndpoint = %q, want %q", cfg.OTLPEndpoint, "localhost:4317")
+	}
+}
+
+func TestLoadRejectsUnknownLogLevel(t *testing.T) {
+	t.Setenv("DATABASE_DSN", "postgres://localhost/orders")
+	t.Setenv("LOG_LEVEL", "chatty")
+
+	if _, err := config.Load("order"); err == nil {
+		t.Fatal("Load accepted an unknown log level, want error")
+	}
 }
 
 func TestLoadFailsWithoutRequiredValue(t *testing.T) {
@@ -538,7 +568,9 @@ func parseLevel(raw string) (slog.Level, error) {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `go test ./internal/config/... -v`
-Expected: PASS, four tests.
+Expected: PASS, five tests. All five documented defaults are asserted; leaving
+`OutboxPollInterval` unasserted would let a regression zero it, and the outbox
+publisher in Task 9 ticks on that value.
 
 - [ ] **Step 5: Commit**
 
@@ -570,7 +602,19 @@ embeds `slog.Handler` and overrides `Handle` loses the wrapper the first time a
 caller writes `logger.With(...)`, because the embedded method returns the inner
 handler. That is the bug this task exists to avoid.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Add the dependency**
+
+Both the test and the implementation import `go.opentelemetry.io/otel/trace`,
+and nothing else. That path is its own Go module, separate from
+`go.opentelemetry.io/otel`, so fetch it by name — and fetch only it, or the
+module graph will carry requirements no code imports:
+
+```bash
+go get go.opentelemetry.io/otel/trace@v1.46.0
+go mod tidy
+```
+
+- [ ] **Step 3: Write the failing tests**
 
 `internal/logger/logger_test.go`:
 
@@ -648,6 +692,9 @@ func TestRecordWithoutSpanOmitsTraceIDs(t *testing.T) {
 	if _, ok := got["trace_id"]; ok {
 		t.Error("trace_id present without a span")
 	}
+	if _, ok := got["span_id"]; ok {
+		t.Error("span_id present without a span")
+	}
 }
 
 func TestWithAttrsPreservesTraceInjection(t *testing.T) {
@@ -677,12 +724,12 @@ func TestLevelIsRespected(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [ ] **Step 3: Run the tests to verify they fail**
 
 Run: `go test ./internal/logger/...`
 Expected: FAIL — package does not exist.
 
-- [ ] **Step 3: Write the implementation**
+- [ ] **Step 4: Write the implementation**
 
 `internal/logger/logger.go`:
 
@@ -732,16 +779,16 @@ func New(w io.Writer, serviceName string, level slog.Level) *slog.Logger {
 }
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `go test ./internal/logger/... -v`
 Expected: PASS, five tests. `TestWithAttrsPreservesTraceInjection` is the one
 that fails if the handler embeds instead of wrapping.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add internal/logger
+git add internal/logger go.mod go.sum
 git commit -m "feat(logger): slog JSON handler injecting trace and span ids
 
 The handler wraps rather than embeds slog.Handler, so WithAttrs and WithGroup
@@ -770,9 +817,16 @@ the collector. See the deviation note above.
 
 - [ ] **Step 1: Add the dependencies**
 
+`go.opentelemetry.io/otel/trace` arrived in Task 3; the core
+`go.opentelemetry.io/otel` module did not, because nothing imported it until
+now. Note also that `otel/sdk` and `otel/sdk/metric` are two separate modules:
+fetching the first does not bring the second, and this file imports both.
+
 ```bash
 go get go.opentelemetry.io/otel@v1.46.0
 go get go.opentelemetry.io/otel/sdk@v1.46.0
+go get go.opentelemetry.io/otel/sdk/metric@v1.46.0
+go get go.opentelemetry.io/otel/metric@v1.46.0
 go get go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc@v1.46.0
 go get go.opentelemetry.io/otel/exporters/prometheus@v0.68.0
 go get github.com/prometheus/client_golang@v1.24.1
@@ -788,6 +842,7 @@ package otelx_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel"
 
@@ -815,7 +870,14 @@ func TestSetupInstallsATracerThatRecords(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
-	t.Cleanup(func() { _ = providers.Shutdown(context.Background()) })
+	t.Cleanup(func() {
+		// Bounds the flush wait. This is the only test that records a span, so
+		// the only one whose Shutdown has anything buffered; the export is
+		// expected to fail against an absent collector and is not asserted here.
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		_ = providers.Shutdown(shutdownCtx)
+	})
 
 	_, span := otel.Tracer("test").Start(context.Background(), "unit")
 	defer span.End()
@@ -916,23 +978,32 @@ func Setup(ctx context.Context, serviceName, otlpEndpoint string) (*Providers, e
 		sdktrace.WithBatcher(traceExporter),
 		sdktrace.WithResource(res),
 	)
-	otel.SetTracerProvider(tracerProvider)
-	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
-		propagation.TraceContext{},
-		propagation.Baggage{},
-	))
 
 	registry := prometheus.NewRegistry()
 	metricReader, err := promexporter.New(promexporter.WithRegisterer(registry))
 	if err != nil {
-		return nil, fmt.Errorf("otelx: metric exporter: %w", err)
+		// NewTracerProvider has already started its batch processor goroutine.
+		// Stop it rather than leaking it behind a Setup that returns no handle
+		// the caller could shut down.
+		return nil, errors.Join(
+			fmt.Errorf("otelx: metric exporter: %w", err),
+			tracerProvider.Shutdown(ctx),
+		)
 	}
 
 	meterProvider := sdkmetric.NewMeterProvider(
 		sdkmetric.WithReader(metricReader),
 		sdkmetric.WithResource(res),
 	)
+
+	// Globals are installed only once every provider is built, so a failed
+	// Setup leaves the process with no half-installed telemetry.
+	otel.SetTracerProvider(tracerProvider)
 	otel.SetMeterProvider(meterProvider)
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+	))
 
 	return &Providers{
 		Registry: registry,
@@ -956,7 +1027,7 @@ func (p *Providers) Shutdown(ctx context.Context) error {
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `go test ./internal/otelx/... -v`
-Expected: PASS, three tests.
+Expected: PASS, three tests, in well under a second in total.
 
 If the compiler reports that `go.opentelemetry.io/otel/semconv/v1.43.0` does not
 exist, list the available versions with
@@ -1104,13 +1175,26 @@ type ErrorResponse struct {
 }
 
 // WriteJSON writes v as JSON with the given status. A nil v writes no body.
+// It marshals rather than streaming through an Encoder, which appends a
+// trailing newline: a stored idempotency response is replayed as raw bytes, so
+// both paths must produce the same bytes for the same value.
 func WriteJSON(ctx context.Context, w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
+
 	if v == nil {
+		w.WriteHeader(status)
 		return
 	}
-	if err := json.NewEncoder(w).Encode(v); err != nil {
+
+	body, err := json.Marshal(v)
+	if err != nil {
+		slog.ErrorContext(ctx, "marshal json response", slog.Any("error", err))
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(status)
+	if _, err := w.Write(body); err != nil {
 		slog.ErrorContext(ctx, "write json response", slog.Any("error", err))
 	}
 }
@@ -1339,13 +1423,12 @@ import (
 )
 
 // Route registers handler at pattern and renames the active server span to the
-// route pattern. ServeMux only fills r.Pattern once it has routed, so the
-// rename has to happen inside the handler; naming spans after the concrete
-// path would produce one span name per order id.
+// route pattern. ServeMux populates r.Pattern only after routing, so the rename
+// happens inside the handler rather than in an outer middleware, and the span
+// name stays low cardinality.
 //
-// handler is an http.Handler rather than an http.HandlerFunc so that per-route
-// middleware, such as the idempotency middleware on POST /orders, composes
-// without an adapter at every call site.
+// handler is an http.Handler so that per-route middleware composes without an
+// adapter at every call site.
 func Route(mux *http.ServeMux, pattern string, handler http.Handler) {
 	mux.Handle(pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		trace.SpanFromContext(r.Context()).SetName(pattern)
@@ -1426,8 +1509,11 @@ func waitForHealthy(t *testing.T, url string) {
 	for time.Now().Before(deadline) {
 		resp, err := http.Get(url) //nolint:noctx // short-lived probe in a test
 		if err == nil {
-			defer resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
+			status := resp.StatusCode
+			if closeErr := resp.Body.Close(); closeErr != nil {
+				t.Logf("close probe response body: %v", closeErr)
+			}
+			if status == http.StatusOK {
 				return
 			}
 		}
@@ -1468,7 +1554,8 @@ type Server struct {
 }
 
 // NewServer wraps the handler in the standard chain: tracing outermost, then
-// request id, panic recovery, and request logging.
+// request id, request logging, and panic recovery innermost. Recovery sits
+// inside logging so a recovered panic's 500 still reaches the access log.
 func NewServer(o Options) *Server {
 	handler := RequestLogging(o.Logger)(Recovery(o.Logger)(o.Handler))
 	handler = RequestID(handler)
@@ -1561,6 +1648,7 @@ func run() error {
 	}
 
 	log := logger.New(os.Stdout, cfg.ServiceName, cfg.LogLevel)
+	slog.SetDefault(log)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -1623,7 +1711,7 @@ is not aborted by the cancellation that triggered it."
 **Closes:** PL-22, PL-23.
 
 **Files:**
-- Create: `deploy/Dockerfile`, `deploy/docker-compose.yml`,
+- Create: `.dockerignore`, `deploy/Dockerfile`, `deploy/docker-compose.yml`,
   `deploy/postgres/init.sql`, `deploy/otel-collector.yaml`,
   `deploy/prometheus.yml`,
   `deploy/grafana/provisioning/datasources/datasources.yml`
@@ -1655,6 +1743,21 @@ FROM gcr.io/distroless/static:nonroot
 COPY --from=build /out/app /app
 USER nonroot:nonroot
 ENTRYPOINT ["/app"]
+```
+
+- [ ] **Step 1b: Write `.dockerignore` at the repo root**
+
+The build context is the repo root, so without this every `docs/` edit
+invalidates the Docker layer cache, and from Task 14 onwards the context
+carries a nested `go.mod` under `docs/`.
+
+```
+.git
+.github
+.superpowers
+docs
+deploy/grafana
+*.md
 ```
 
 - [ ] **Step 2: Write `deploy/postgres/init.sql`**
@@ -1745,6 +1848,9 @@ services:
       POSTGRES_USER: lab
       POSTGRES_PASSWORD: lab
       POSTGRES_DB: lab
+      # postgres 18 defaults PGDATA to /var/lib/postgresql/18/docker; this
+      # pins it to the path the pgdata volume is mounted at.
+      PGDATA: /var/lib/postgresql/data
     ports:
       - "5432:5432"
     volumes:
@@ -1788,7 +1894,7 @@ services:
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
     ports:
-      - "3000:3000"
+      - "3300:3000"
     depends_on:
       - prometheus
 
@@ -1832,7 +1938,7 @@ later task assumes traces work.
 
 Confirm Prometheus is up at `http://localhost:9090` (the `order` target will
 report down until Task 12 adds `/metrics`; that is expected here) and Grafana at
-`http://localhost:3000` shows both provisioned datasources.
+`http://localhost:3300` shows both provisioned datasources.
 
 - [ ] **Step 8: Tear down and commit**
 
@@ -1879,7 +1985,6 @@ go get github.com/jackc/pgx/v5@v5.10.0
 go get github.com/pressly/goose/v3@v3.28.0
 go get github.com/testcontainers/testcontainers-go@v0.44.0
 go get github.com/testcontainers/testcontainers-go/modules/postgres@v0.44.0
-go get github.com/stretchr/testify@v1.12.1
 ```
 
 - [ ] **Step 2: Write the integration test helper**
@@ -1909,7 +2014,7 @@ func StartPostgres(t *testing.T) *pgxpool.Pool {
 	ctx := context.Background()
 
 	container, err := tcpostgres.Run(ctx, "postgres:18.6",
-		tcpostgres.WithDatabase("orders"),
+		tcpostgres.WithDatabase("labtest"),
 		tcpostgres.WithUsername("lab"),
 		tcpostgres.WithPassword("lab"),
 		testcontainers.WithWaitStrategy(
@@ -2097,7 +2202,10 @@ func TestMigrateIsSafeUnderConcurrentStartup(t *testing.T) {
 	ctx := context.Background()
 	pool := postgres.StartPostgres(t)
 
-	const replicas = 5
+	// goose retries pg_try_advisory_lock on a five second interval, so each
+	// loser waits a full interval before its next attempt. Three racers prove
+	// the property; more only add wall clock.
+	const replicas = 3
 	errs := make(chan error, replicas)
 	for range replicas {
 		go func() { errs <- postgres.Migrate(ctx, pool, migrations()) }()
@@ -2269,6 +2377,9 @@ can use `errors.Is` against their own sentinels.
 
 Run: `go test -tags=integration -race ./internal/postgres/... -v`
 Expected: PASS, five tests. Requires a working Docker daemon.
+`TestMigrateIsSafeUnderConcurrentStartup` alone takes about ten seconds because
+of goose's five-second lock retry interval; that is the test working, not
+hanging.
 
 - [ ] **Step 9: Add the integration job to CI**
 
@@ -3043,7 +3154,7 @@ func TestConcurrentPublishersDoNotDoublePublish(t *testing.T) {
 	wg.Wait()
 
 	if got := sink.count(); got != 20 {
-		t.Fatalf("sink saw %d publishes for 20 events; FOR UPDATE SKIP LOCKED is not doing its job", got)
+		t.Fatalf("sink saw %d publishes for 20 events; a claimed row was published twice", got)
 	}
 }
 
@@ -3060,8 +3171,19 @@ func waitFor(t *testing.T, cond func() bool) {
 }
 ```
 
-`TestConcurrentPublishersDoNotDoublePublish` is the test that fails if
-`FOR UPDATE SKIP LOCKED` is dropped from the claim query.
+Add `"github.com/jackc/pgx/v5/pgxpool"` to the imports here too; `seedEvent`
+and `newPublisher` both take one.
+
+`TestConcurrentPublishersDoNotDoublePublish` proves that concurrent publishers
+never publish a row twice. It does **not** isolate `SKIP LOCKED`: dropping that
+clause leaves the test green, because plain `FOR UPDATE` blocks the second
+publisher until the first commits, and the blocked query then re-evaluates its
+`WHERE` clause under READ COMMITTED and no longer matches the now-published row.
+
+What `SKIP LOCKED` actually buys is liveness, not correctness. Without it,
+replicas serialise behind each other on the same rows instead of taking disjoint
+batches in parallel. Correctness comes from claiming and marking the row inside
+one transaction.
 
 - [ ] **Step 7: Run to verify failure**
 
@@ -3241,10 +3363,12 @@ Expected: PASS, five tests.
 git add internal/outbox
 git commit -m "feat(outbox): transactional append and SKIP LOCKED publisher
 
-FOR UPDATE SKIP LOCKED is what lets several publisher replicas drain the same
-table without publishing an event twice. drainBatch commits the failure record
-rather than returning the publish error, so a failed attempt does not roll back
-its own retry count."
+FOR UPDATE SKIP LOCKED lets several publisher replicas take disjoint batches
+instead of serialising behind each other. It is a liveness property: correctness
+comes from claiming and marking a row inside one transaction, which plain FOR
+UPDATE also preserves. drainBatch commits the failure record rather than
+returning the publish error, so a failed attempt does not roll back its own
+retry count."
 ```
 
 ---
@@ -3579,7 +3703,7 @@ CREATE TABLE idempotency_keys (
     state         text        NOT NULL,
     resource_type text        NOT NULL DEFAULT '',
     resource_id   text        NOT NULL DEFAULT '',
-    response_body jsonb,
+    response_body json,
     status_code   integer     NOT NULL DEFAULT 0,
     created_at    timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT idempotency_keys_state_valid
@@ -3663,7 +3787,7 @@ RETURNING key`
 func (s *Store) get(ctx context.Context, key string) (Record, error) {
 	const query = `
 SELECT key, request_hash, state, resource_type, resource_id,
-       coalesce(response_body, 'null'::jsonb), status_code
+       coalesce(response_body, 'null'::json), status_code
   FROM idempotency_keys
  WHERE key = $1`
 
@@ -3750,14 +3874,20 @@ import (
 
 const requestBody = `{"customer_id":"cust_1","payment_method_id":"pm_ok"}`
 
-// creator is a stand-in for the order handler: it completes the claim inside
-// its own transaction, exactly as the real use case does.
+// creator stands in for a handler that completes its idempotency claim inside
+// its own transaction.
 func creator(t *testing.T, pool *pgxpool.Pool, resourceID string) http.Handler {
 	t.Helper()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key, ok := idempotency.KeyFromContext(r.Context())
 		if !ok {
 			t.Error("handler ran without an idempotency key in context")
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		received, err := io.ReadAll(r.Body)
+		if err != nil || len(received) == 0 {
+			t.Errorf("handler read %q from the request body, want the original payload", received)
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
@@ -3791,8 +3921,7 @@ func post(t *testing.T, h http.Handler, key, body string) *httptest.ResponseReco
 }
 
 func TestMiddlewareRejectsMissingKey(t *testing.T) {
-	ctx, pool, s := store(t)
-	_ = ctx
+	_, pool, s := store(t)
 	h := idempotency.Require(s)(creator(t, pool, "ord_1"))
 
 	rec := post(t, h, "", requestBody)
@@ -3884,6 +4013,31 @@ func TestMiddlewareReleasesClaimOnHandlerFailure(t *testing.T) {
 	}
 	if outcome != idempotency.OutcomeOwned {
 		t.Fatalf("outcome = %v after a 500, want OutcomeOwned; the claim leaked", outcome)
+	}
+}
+
+func TestMiddlewareReleasesClaimWhenHandlerPanics(t *testing.T) {
+	_, _, s := store(t)
+	panicking := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("boom")
+	})
+	h := idempotency.Require(s)(panicking)
+
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("panic did not propagate past the middleware")
+			}
+		}()
+		post(t, h, "key-1", requestBody)
+	}()
+
+	outcome, _, err := s.Claim(context.Background(), "key-1", mustHash(t, requestBody))
+	if err != nil {
+		t.Fatalf("Claim after panic: %v", err)
+	}
+	if outcome != idempotency.OutcomeOwned {
+		t.Fatalf("outcome = %v after a panic, want OutcomeOwned; the claim was stranded", outcome)
 	}
 }
 
@@ -4000,11 +4154,22 @@ func Require(store *Store) func(http.Handler) http.Handler {
 			}
 
 			capture := &statusCapture{ResponseWriter: w}
-			next.ServeHTTP(capture, r.WithContext(context.WithValue(ctx, keyContextKey, key)))
+			handlerReturned := false
 
-			if capture.status >= http.StatusInternalServerError {
-				_ = store.Release(context.WithoutCancel(ctx), key)
-			}
+			// Deferred so the claim is released on a panic as well as on a
+			// non-2xx. A validation failure records no result, so the client
+			// can correct the request and retry under the same key.
+			defer func() {
+				succeeded := handlerReturned &&
+					capture.status >= http.StatusOK &&
+					capture.status < http.StatusMultipleChoices
+				if !succeeded {
+					_ = store.Release(context.WithoutCancel(ctx), key)
+				}
+			}()
+
+			next.ServeHTTP(capture, r.WithContext(context.WithValue(ctx, keyContextKey, key)))
+			handlerReturned = true
 		})
 	}
 }
@@ -4016,7 +4181,7 @@ still gets its claim released, rather than leaving the key stuck in progress.
 - [ ] **Step 10: Run the middleware tests to verify they pass**
 
 Run: `go test -tags=integration -race ./internal/idempotency/... -v`
-Expected: PASS, sixteen tests: three hash, seven store, six middleware.
+Expected: PASS, seventeen tests: three hash, seven store, seven middleware.
 
 - [ ] **Step 11: Commit**
 
@@ -4132,13 +4297,15 @@ CREATE INDEX outbox_events_claimable
     ON outbox_events (next_attempt_at)
     WHERE status IN ('pending', 'retrying');
 
+-- response_body is json rather than jsonb: jsonb canonicalises on storage,
+-- reordering object keys, and a replay must return the original bytes.
 CREATE TABLE idempotency_keys (
     key           text        PRIMARY KEY,
     request_hash  text        NOT NULL,
     state         text        NOT NULL,
     resource_type text        NOT NULL DEFAULT '',
     resource_id   text        NOT NULL DEFAULT '',
-    response_body jsonb,
+    response_body json,
     status_code   integer     NOT NULL DEFAULT 0,
     created_at    timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT idempotency_keys_state_valid
@@ -4659,13 +4826,9 @@ import (
 
 	"github.com/tunedev/go-resilient-commerce-lab/internal/idempotency"
 	"github.com/tunedev/go-resilient-commerce-lab/internal/outbox"
-	infrapg "github.com/tunedev/go-resilient-commerce-lab/internal/postgres"
+	infrapg "github.com/tunedev/go-resilient-commerce-lab/internal/postgres" // aliased: this package is also named postgres
 	"github.com/tunedev/go-resilient-commerce-lab/services/order/domain"
 )
-
-// This package is also called postgres. Importing internal/postgres under its
-// own name is legal, since a package never refers to itself by name, but the
-// alias keeps the two apart for a reader.
 
 // Store is the OrderStore implementation.
 type Store struct {
@@ -5494,7 +5657,7 @@ func Metrics(registry *prometheus.Registry) http.Handler {
 - [ ] **Step 3: Run the tests to verify they pass**
 
 Run: `go test ./internal/httpx/... -race -v`
-Expected: PASS, ten tests.
+Expected: PASS, including the three added here.
 
 - [ ] **Step 4: Register the routes in `cmd/order/main.go`**
 
@@ -5503,6 +5666,7 @@ Replace the inline `/healthz` closure with:
 ```go
 	httpx.Route(mux, "GET /healthz", httpx.Health())
 	httpx.Route(mux, "GET /readyz", httpx.Ready(pool.Ping))
+	// Handle, not Route: scrapes should not open a span.
 	mux.Handle("GET /metrics", httpx.Metrics(providers.Registry))
 ```
 
@@ -5675,14 +5839,14 @@ func (c *orderClient) waitReady(ctx context.Context, timeout time.Duration) erro
 	for time.Now().Before(deadline) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/readyz", nil)
 		if err != nil {
-			return err
+			return fmt.Errorf("build readiness request: %w", err)
 		}
 		if resp, err := c.do(req); err == nil && resp.Status == http.StatusOK {
 			return nil
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return fmt.Errorf("waiting for %s: %w", c.baseURL, ctx.Err())
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
@@ -5928,7 +6092,7 @@ cd ..
 
 ```toml
 baseURL = "https://tunedev.github.io/go-resilient-commerce-lab/"
-languageCode = "en-gb"
+locale = "en-gb"
 title = "go-resilient-commerce-lab"
 enableRobotsTXT = true
 
@@ -5937,7 +6101,7 @@ enableRobotsTXT = true
     path = "github.com/adityatelange/hugo-PaperMod"
 
 [params]
-  description = "A Go microservices lab for distributed failure modes: idempotency, sagas, outbox, payment uncertainty, and the traces that explain them."
+  description = "A Go microservices lab for distributed failure modes: idempotent request handling, a transactional outbox, and the traces that explain them."
   ShowReadingTime = true
   ShowCodeCopyButtons = true
   ShowPostNavLinks = true
@@ -5963,14 +6127,18 @@ enableRobotsTXT = true
 - [ ] **Step 3: Write `docs/layouts/shortcodes/diagram.html`**
 
 ```html
+{{ $name := .Get "name" }}
+{{ $title := .Get "title" }}
+{{ if not $name }}{{ errorf "diagram shortcode called without a name in %s" .Page.File.Path }}{{ end }}
+{{ if not $title }}{{ errorf "diagram shortcode called without a title in %s" .Page.File.Path }}{{ end }}
 <figure class="diagram">
   <iframe
-    src="{{ .Site.BaseURL }}diagrams/{{ .Get "name" }}.html"
-    title="{{ .Get "title" }}"
+    src="{{ .Site.BaseURL }}diagrams/{{ $name }}.html"
+    title="{{ $title }}"
     loading="lazy"
     style="width:100%;height:{{ default "640" (.Get "height") }}px;border:0;border-radius:8px;">
   </iframe>
-  <figcaption>{{ .Get "title" }}</figcaption>
+  <figcaption>{{ $title }}</figcaption>
 </figure>
 ```
 
@@ -6037,11 +6205,24 @@ jobs:
 `setup-go` is required before Hugo because the theme is a Hugo Module, which is
 fetched with the Go module tooling.
 
+- [ ] **Step 5b: Point the README at the published diagram**
+
+Now that the site exists, add one line to the README's Topology section:
+
+```markdown
+The interactive version of this diagram is on the site; the README keeps a
+static Mermaid one because GitHub renders it inline.
+```
+
+Task 15 deliberately left this out, because at that point neither the site nor
+the diagram existed.
+
 - [ ] **Step 6: Verify locally**
 
 Run: `make site`
 Expected: the site serves on `http://localhost:1313/go-resilient-commerce-lab/`
-with the PaperMod theme and a Posts menu entry.
+with the PaperMod theme and a Posts menu entry, and
+`/architecture/system-topology/` renders the diagram iframe from Task 16.
 
 - [ ] **Step 7: Commit and confirm the deploy**
 
@@ -6096,8 +6277,9 @@ Required sections:
 
 1. **What this is** — two or three sentences.
 2. **Quick start** — `make docker-up`, then
-   `make scenario NAME=duplicate-order`, then the URLs: order `:8080`,
-   Jaeger `:16686`, Prometheus `:9090`, Grafana `:3000`.
+   `make scenario NAME=duplicate-order`, then the URLs: order
+   `:8080/healthz` (there is no route at the bare root), Jaeger `:16686`,
+   Prometheus `:9090`, Grafana `:3300`.
 3. **Topology** — the inline Mermaid diagram below.
 4. **The rules that keep it honest** — one line each: four separate logical
    databases so no cross-service transaction is possible; `internal/` holds no
@@ -6117,8 +6299,12 @@ flowchart LR
   grafana --> jaeger
 ```
 
-The interactive version of this diagram lives on the site; the README keeps a
-static Mermaid one because GitHub renders it inline.
+The README keeps a static Mermaid diagram because GitHub renders it inline.
+
+Do not mention the interactive diagram or the site here. Neither exists until
+Tasks 14 and 16, and a README that describes a future deliverable as a present
+fact is the overclaim this section is meant to avoid. Task 14 adds the pointer
+once there is something to point at.
 
 - [ ] **Step 3: Verify the quick start from a clean checkout**
 
@@ -6176,15 +6362,17 @@ Open `docs/static/diagrams/system-topology.html` directly in a browser with no
 web server. Expected: it renders with no network requests, the step-through
 plays, and both light and dark themes are legible.
 
-- [ ] **Step 3: Embed and verify through Hugo**
+- [ ] **Step 3: Write the companion description**
 
-Add the shortcode to `docs/content/architecture/system-topology.md`:
+`docs/content/architecture/system-topology.md` carries the companion Markdown
+the skill emits, plus the shortcode that will embed the diagram:
 
 ```
 {{</* diagram name="system-topology" title="The order path and the transaction boundary" */>}}
 ```
 
-Run `make site` and confirm the iframe loads at the site's base URL.
+The shortcode cannot be rendered until Task 14 builds the site, so verifying the
+iframe belongs there. Task 14 runs `make site` and confirms it loads.
 
 - [ ] **Step 4: Commit**
 
@@ -6238,8 +6426,10 @@ Cover, with real code from the repository:
   and in five services rather than one.
 - `httpx.Route` and low-cardinality span names.
 - Embed the `system-topology` diagram.
-- **Run it yourself:** `make docker-up`, then the Jaeger screenshot of a
-  `POST /orders` trace.
+- **Run it yourself:** `make docker-up`, then the real trace fetched from
+  Jaeger's API for a `POST /orders` request, quoted as output rather than a
+  screenshot. A pasted terminal transcript a reader can reproduce beats an
+  image they cannot.
 
 - [ ] **Step 2: Write post two, "Idempotency keys: making a retried POST safe"**
 
@@ -6254,9 +6444,12 @@ Cover:
 - What `202` honestly means when a duplicate arrives mid-flight, and what
   happens to an `in_progress` row whose owner crashed.
 - Releasing the claim on `5xx`, and why the release uses `context.WithoutCancel`.
-- **Run it yourself:** `make scenario NAME=duplicate-order`, with the output and
-  a Jaeger screenshot showing three `POST /orders` spans where only one reaches
-  the database.
+- **Run it yourself:** `make scenario NAME=duplicate-order`, with its real
+  output, and the three `POST /orders` spans fetched from Jaeger's API. Note
+  what the trace does NOT show: there are no database spans in this epic, so
+  the trace cannot reveal which request reached Postgres. Say that plainly
+  rather than implying the trace proves more than it does. Per-query spans
+  arrive in Epic G.
 
 - [ ] **Step 3: Verify both posts render**
 
@@ -6295,7 +6488,8 @@ PL-35 and PL-7 to Done in Jira.
 - `make docker-up` brings up twelve containers and `curl localhost:8080/healthz` answers.
 - `make scenario NAME=duplicate-order` prints PASS and a Jaeger trace URL.
 - A `POST /orders` trace is visible in Jaeger, named `POST /orders`, with the
-  request's log lines carrying the same `trace_id`.
+  request's log lines carrying the same `trace_id`. The trace has one server
+  span and no database child; that is expected in this epic.
 - Prometheus reports the `order` target up and serves
   `http_server_request_duration` for it.
 - Both posts are live on GitHub Pages with the interactive diagram embedded.

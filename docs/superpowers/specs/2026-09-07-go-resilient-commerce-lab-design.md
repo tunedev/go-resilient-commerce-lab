@@ -169,7 +169,10 @@ processed_events       event_id, event_type, processed_at
 
 `idempotency_keys.key` is the primary key. `state` distinguishes `in_progress`
 from `completed`, which is what allows a concurrent duplicate to receive `202`
-rather than a partial result.
+rather than a partial result. `response_body` is stored as `json`, not `jsonb`:
+`jsonb` canonicalises on storage and reorders object keys, and a replay has to
+return the original bytes. `outbox_events.payload` stays `jsonb`, since consumers
+parse it and byte identity there buys nothing.
 
 ### inventory database
 
@@ -274,6 +277,10 @@ header, stored with a hash of the request body:
 | Same key, different body | `409 Conflict` |
 | No key | `400 Bad Request` |
 
+A request that does not return 2xx records no result and releases its claim, so
+a caller that fixes a validation error can retry under the same key. Storing a
+failure as the completion would freeze the bad request forever.
+
 ### 5.5 Outbox
 
 State change and event row commit in the same local transaction. The publisher
@@ -287,8 +294,17 @@ SELECT * FROM outbox_events
  LIMIT $1;
 ```
 
-`SKIP LOCKED` is what allows multiple publisher replicas without
-double-publishing. On failure the row moves to `retrying` with backoff; past the
+A batch is claimed, published and marked in one transaction, so if recording a
+failure fails partway through, the whole batch rolls back and events already
+published in it are published again on the next cycle. That is at-least-once
+delivery working as intended, and it is why consumers deduplicate by event id.
+
+`SKIP LOCKED` lets multiple publisher replicas take disjoint batches instead of
+serialising behind each other. It is a liveness property, not a correctness one:
+plain `FOR UPDATE` also avoids double-publishing, because the blocked query
+re-evaluates its `WHERE` clause under READ COMMITTED once the first publisher
+commits and no longer matches the published row. Correctness comes from claiming
+and marking the row inside a single transaction. On failure the row moves to `retrying` with backoff; past the
 retry cap it becomes `dead_lettered` with `last_error` recorded.
 
 ### 5.6 Inbox dedupe
@@ -398,7 +414,10 @@ services is the failure mode this ordering avoids.
 
 - **Traces.** OTel SDK in every service. `otelhttp` for inbound and outbound
   HTTP; manual spans around DB queries and Kafka produce/consume. OTLP/gRPC to
-  the collector; the collector fans out to Jaeger.
+  the collector; the collector fans out to Jaeger. Epic A delivers the HTTP
+  spans only. Per-query database spans and `db_query_duration_seconds` arrive in
+  Epic G, which is where the latency work that needs them lives, so an Epic A
+  trace shows one server span per request with no database child.
 - **Trace context across the broker.** W3C `traceparent` is injected into Kafka
   record headers on produce and extracted on consume. Omitting this kills every
   trace at the broker, which is the single most common instrumentation mistake
@@ -459,7 +478,8 @@ pages        hugo build -> deploy GitHub Pages    (main only)
 ```
 
 Makefile targets: `test` `test-race` `lint` `fmt` `vet` `run` `docker-up`
-`docker-down` `migrate` `scenario` `site`.
+`docker-down` `scenario` `site`. There is no `migrate` target: migrations run at
+service startup under an advisory lock.
 
 The PR template carries: Summary, Why, What changed, How it was tested, Risk,
 Rollback plan, Observability impact.
@@ -488,7 +508,7 @@ command.
 | B | The last PlayStation problem: preventing oversell without a distributed lock |
 | C | A timeout is not a failure: modelling payment uncertainty · Reconciliation: finding out what actually happened |
 | D | Sagas without a framework · The compensation you must not run |
-| E | The outbox pattern, and why SKIP LOCKED is the whole trick · Exactly-once delivery does not exist; exactly-once effect does |
+| E | The outbox pattern, and what SKIP LOCKED actually buys you · Exactly-once delivery does not exist; exactly-once effect does |
 | F | You cannot unsend an email: honest guarantees for external side effects · Retries that help versus retries that amplify |
 | G | Your traces die at the broker, and how to fix it · What to actually put on the dashboard |
 | H | DB CPU is low but you are waiting on Postgres: a latency triage guide · Eight percent error rate on some pods, and rollback removes the security fix |
